@@ -1,6 +1,7 @@
-use bitcoin::hashes::{sha256d, Hash};
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::fmt;
+
+use p256::NonZeroScalar;
+use utils::arr_to_hex;
 
 use crate::blockchain::proto::script;
 use crate::blockchain::proto::varuint::VarUint;
@@ -22,7 +23,7 @@ pub struct RawTx {
 pub struct EvaluatedTx {
     pub version: u32,
     pub in_count: VarUint,
-    pub inputs: Vec<TxInput>,
+    pub inputs: Vec<EvaluatedTxIn>,
     pub out_count: VarUint,
     pub outputs: Vec<EvaluatedTxOut>,
     pub locktime: u32,
@@ -40,8 +41,13 @@ impl EvaluatedTx {
     ) -> Self {
         // Evaluate and wrap all outputs to process them later
         let outputs = outputs
-            .into_par_iter()
+            .into_iter()
             .map(|o| EvaluatedTxOut::eval_script(o, version_id))
+            .collect();
+        // also evaluate TxInputs
+        let inputs = inputs
+            .into_iter()
+            .map(|i| EvaluatedTxIn::eval_script(i, version_id))
             .collect();
         EvaluatedTx {
             version,
@@ -53,10 +59,11 @@ impl EvaluatedTx {
         }
     }
 
+    #[inline]
     pub fn is_coinbase(&self) -> bool {
         if self.in_count.value == 1 {
             let input = self.inputs.first().unwrap();
-            return input.outpoint.txid.as_ref() == [0u8; 32] && input.outpoint.index == 0xFFFFFFFF;
+            return input.input.outpoint.txid == [0u8; 32] && input.input.outpoint.index == 0xFFFFFFFF;
         }
         false
     }
@@ -97,7 +104,7 @@ impl ToRaw for EvaluatedTx {
         // Serialize all TxInputs
         bytes.extend_from_slice(&self.in_count.to_bytes());
         for i in &self.inputs {
-            bytes.extend_from_slice(&i.to_bytes());
+            bytes.extend_from_slice(&i.input.to_bytes());
         }
         // Serialize all TxOutputs
         bytes.extend_from_slice(&self.out_count.to_bytes());
@@ -113,20 +120,21 @@ impl ToRaw for EvaluatedTx {
 /// TxOutpoint references an existing transaction output
 #[derive(PartialEq, Eq, Hash)]
 pub struct TxOutpoint {
-    pub txid: sha256d::Hash,
+    pub txid: [u8; 32],
     pub index: u32, // 0-based offset within tx
 }
 
 impl TxOutpoint {
-    pub fn new(txid: sha256d::Hash, index: u32) -> Self {
+    pub fn new(txid: [u8; 32], index: u32) -> Self {
         Self { txid, index }
     }
 }
 
 impl ToRaw for TxOutpoint {
+    #[inline]
     fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(32 + 4);
-        bytes.extend_from_slice(self.txid.as_byte_array());
+        bytes.extend_from_slice(&self.txid);
         bytes.extend_from_slice(&self.index.to_le_bytes());
         bytes
     }
@@ -135,7 +143,7 @@ impl ToRaw for TxOutpoint {
 impl fmt::Debug for TxOutpoint {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         fmt.debug_struct("TxOutpoint")
-            .field("txid", &self.txid)
+            .field("txid", &utils::arr_to_hex_swapped(&self.txid))
             .field("index", &self.index)
             .finish()
     }
@@ -150,6 +158,7 @@ pub struct TxInput {
 }
 
 impl ToRaw for TxInput {
+    #[inline]
     fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(36 + 5 + self.script_len.value as usize + 4);
         bytes.extend_from_slice(&self.outpoint.to_bytes());
@@ -171,6 +180,36 @@ impl fmt::Debug for TxInput {
     }
 }
 
+/// Evaluates scriptSig and wraps TxInput
+pub struct EvaluatedTxIn {
+    pub script: script::EvaluatedScript,
+    pub input: TxInput,
+}
+
+impl EvaluatedTxIn {
+    pub fn eval_script(input: TxInput, version_id: u8) -> EvaluatedTxIn {
+        EvaluatedTxIn {
+            script: script::eval_from_bytes(&input.script_sig, version_id),
+            input,
+        }
+    }
+
+    pub fn as_csv(&self, r: NonZeroScalar, s: NonZeroScalar,
+                  pubkey: &Vec<u8>, txid: &str,
+                  message_hash_str: String, block_time: u32) -> String {
+        // (@txid, @hashPrevOut, indexPrevOut, scriptSig, sequence)
+        format!(
+            "{:x};{:x};{};{};{};{}\n",
+            r,
+            s,
+            arr_to_hex(&pubkey),
+            txid,
+            message_hash_str,
+            block_time
+        )
+    }
+}
+
 /// Evaluates script_pubkey and wraps TxOutput
 pub struct EvaluatedTxOut {
     pub script: script::EvaluatedScript,
@@ -178,6 +217,7 @@ pub struct EvaluatedTxOut {
 }
 
 impl EvaluatedTxOut {
+    #[inline]
     pub fn eval_script(out: TxOutput, version_id: u8) -> EvaluatedTxOut {
         EvaluatedTxOut {
             script: script::eval_from_bytes(&out.script_pubkey, version_id),
@@ -194,6 +234,7 @@ pub struct TxOutput {
 }
 
 impl ToRaw for TxOutput {
+    #[inline]
     fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(8 + 5 + self.script_len.value as usize);
         bytes.extend_from_slice(&self.value.to_le_bytes());

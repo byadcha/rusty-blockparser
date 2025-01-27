@@ -3,8 +3,9 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
-use clap::{Arg, ArgMatches, Command};
+use clap::{App, Arg, ArgMatches, SubCommand};
 
+use crate::blockchain::parser::types::CoinType;
 use crate::blockchain::proto::block::Block;
 use crate::callbacks::{common, Callback};
 use crate::errors::OpResult;
@@ -23,21 +24,21 @@ pub struct Balances {
 
 impl Balances {
     fn create_writer(cap: usize, path: PathBuf) -> OpResult<BufWriter<File>> {
-        Ok(BufWriter::with_capacity(cap, File::create(path)?))
+        Ok(BufWriter::with_capacity(cap, File::create(&path)?))
     }
 }
 
 impl Callback for Balances {
-    fn build_subcommand() -> Command
+    fn build_subcommand<'a, 'b>() -> App<'a, 'b>
     where
         Self: Sized,
     {
-        Command::new("balances")
+        SubCommand::with_name("balances")
             .about("Dumps all addresses with non-zero balance to CSV file")
             .version("0.1")
             .author("gcarq <egger.m@protonmail.com>")
             .arg(
-                Arg::new("dump-folder")
+                Arg::with_name("dump-folder")
                     .help("Folder to store csv file")
                     .index(1)
                     .required(true),
@@ -48,7 +49,7 @@ impl Callback for Balances {
     where
         Self: Sized,
     {
-        let dump_folder = &PathBuf::from(matches.get_one::<String>("dump-folder").unwrap());
+        let dump_folder = &PathBuf::from(matches.value_of("dump-folder").unwrap());
         let cb = Balances {
             dump_folder: PathBuf::from(dump_folder),
             writer: Balances::create_writer(4000000, dump_folder.join("balances.csv.tmp"))?,
@@ -59,9 +60,9 @@ impl Callback for Balances {
         Ok(cb)
     }
 
-    fn on_start(&mut self, block_height: u64) -> OpResult<()> {
+    fn on_start(&mut self, _: &CoinType, block_height: u64) -> OpResult<()> {
         self.start_height = block_height;
-        info!(target: "callback", "Executing balances with dump folder: {} ...", &self.dump_folder.display());
+        info!(target: "callback", "Using `balances` with dump folder: {} ...", &self.dump_folder.display());
         Ok(())
     }
 
@@ -74,8 +75,8 @@ impl Callback for Balances {
     ///   * address
     fn on_block(&mut self, block: &Block, block_height: u64) -> OpResult<()> {
         for tx in &block.txs {
-            common::remove_unspents(tx, &mut self.unspents);
-            common::insert_unspents(tx, block_height, &mut self.unspents);
+            common::remove_unspents(&tx, &mut self.unspents);
+            common::insert_unspents(&tx, block_height, &mut self.unspents);
         }
         Ok(())
     }
@@ -87,10 +88,10 @@ impl Callback for Balances {
             .write_all(format!("{};{}\n", "address", "balance").as_bytes())?;
 
         // Collect balances for each address
-        let mut balances: HashMap<&str, u64> = HashMap::new();
-        for unspent in self.unspents.values() {
-            let entry = balances.entry(&unspent.address).or_insert(0);
-            *entry += unspent.value
+        let mut balances: HashMap<String, u64> = HashMap::new();
+        for value in self.unspents.values() {
+            let entry = balances.entry(value.address.clone()).or_insert(0);
+            *entry += value.value
         }
 
         for (address, balance) in balances.iter() {

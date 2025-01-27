@@ -1,14 +1,15 @@
-use bitcoin::hashes::{sha256d, Hash};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
 use byteorder::{LittleEndian, ReadBytesExt};
-use clap::{Arg, ArgMatches, Command};
+use clap::{App, Arg, ArgMatches, SubCommand};
 
+use crate::blockchain::parser::types::CoinType;
 use crate::blockchain::proto::block::Block;
 use crate::callbacks::{common, Callback};
+use crate::common::utils;
 use crate::errors::OpResult;
 
 /// Dumps the UTXOs along with address in a csv file
@@ -27,21 +28,21 @@ pub struct UnspentCsvDump {
 
 impl UnspentCsvDump {
     fn create_writer(cap: usize, path: PathBuf) -> OpResult<BufWriter<File>> {
-        Ok(BufWriter::with_capacity(cap, File::create(path)?))
+        Ok(BufWriter::with_capacity(cap, File::create(&path)?))
     }
 }
 
 impl Callback for UnspentCsvDump {
-    fn build_subcommand() -> Command
+    fn build_subcommand<'a, 'b>() -> App<'a, 'b>
     where
         Self: Sized,
     {
-        Command::new("unspentcsvdump")
+        SubCommand::with_name("unspentcsvdump")
             .about("Dumps the unspent outputs to CSV file")
             .version("0.1")
             .author("fsvm88 <fsvm88@gmail.com>")
             .arg(
-                Arg::new("dump-folder")
+                Arg::with_name("dump-folder")
                     .help("Folder to store csv file")
                     .index(1)
                     .required(true),
@@ -52,7 +53,7 @@ impl Callback for UnspentCsvDump {
     where
         Self: Sized,
     {
-        let dump_folder = &PathBuf::from(matches.get_one::<String>("dump-folder").unwrap());
+        let dump_folder = &PathBuf::from(matches.value_of("dump-folder").unwrap());
         let cb = UnspentCsvDump {
             dump_folder: PathBuf::from(dump_folder),
             writer: UnspentCsvDump::create_writer(4000000, dump_folder.join("unspent.csv.tmp"))?,
@@ -65,9 +66,9 @@ impl Callback for UnspentCsvDump {
         Ok(cb)
     }
 
-    fn on_start(&mut self, block_height: u64) -> OpResult<()> {
+    fn on_start(&mut self, _: &CoinType, block_height: u64) -> OpResult<()> {
         self.start_height = block_height;
-        info!(target: "callback", "Executing unspentcsvdump with dump folder: {} ...", &self.dump_folder.display());
+        info!(target: "callback", "Using `unspentcsvdump` with dump folder: {} ...", &self.dump_folder.display());
         Ok(())
     }
 
@@ -80,8 +81,8 @@ impl Callback for UnspentCsvDump {
     ///   * address
     fn on_block(&mut self, block: &Block, block_height: u64) -> OpResult<()> {
         for tx in &block.txs {
-            self.in_count += common::remove_unspents(tx, &mut self.unspents);
-            self.out_count += common::insert_unspents(tx, block_height, &mut self.unspents);
+            self.in_count += common::remove_unspents(&tx, &mut self.unspents);
+            self.out_count += common::insert_unspents(&tx, block_height, &mut self.unspents);
         }
         self.tx_count += block.tx_count.value;
         Ok(())
@@ -96,12 +97,12 @@ impl Callback for UnspentCsvDump {
             .as_bytes(),
         )?;
         for (key, value) in self.unspents.iter() {
-            let txid = sha256d::Hash::from_slice(&key[0..32]).unwrap();
+            let txid = &key[0..32];
             let mut index = &key[32..];
             self.writer.write_all(
                 format!(
                     "{};{};{};{};{}\n",
-                    txid,
+                    utils::arr_to_hex_swapped(txid),
                     index.read_u32::<LittleEndian>()?,
                     value.block_height,
                     value.value,
@@ -119,11 +120,11 @@ impl Callback for UnspentCsvDump {
             )),
         )?;
 
-        info!(target: "callback", "Done.\nDumped blocks from height {} to {}:\n\
+        info!(target: "callback", "Done.\nDumped all {} blocks:\n\
                                    \t-> transactions: {:9}\n\
                                    \t-> inputs:       {:9}\n\
                                    \t-> outputs:      {:9}",
-             self.start_height, block_height, self.tx_count, self.in_count, self.out_count);
+             block_height, self.tx_count, self.in_count, self.out_count);
         Ok(())
     }
 }

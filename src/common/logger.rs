@@ -1,8 +1,7 @@
-use chrono::{DateTime, Utc};
 use std::io::{stderr, stdout, Write};
-use std::time::SystemTime;
 
 use log::{self, Level, LevelFilter, Metadata, Record, SetLoggerError};
+use time::OffsetDateTime;
 
 pub struct SimpleLogger {
     level_filter: LevelFilter,
@@ -16,12 +15,11 @@ impl SimpleLogger {
         Ok(())
     }
 
-    fn format_log(&self, record: &Record) -> String {
-        let datetime: DateTime<Utc> = SystemTime::now().into();
+    fn create_log_line(&self, record: &Record) -> String {
         format!(
-            "[{}] {} - {}: {}\n",
-            datetime.format("%T"),
-            record.level(),
+            "[{} UTC] {} - {}: {}\n",
+            OffsetDateTime::now_utc().format("%T"),
+            record.level().to_string(),
             record.target(),
             record.args()
         )
@@ -35,7 +33,7 @@ impl log::Log for SimpleLogger {
 
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
-            let line = self.format_log(record);
+            let line = self.create_log_line(record);
             match record.level() {
                 Level::Error => {
                     stderr().write_all(line.as_bytes()).unwrap();

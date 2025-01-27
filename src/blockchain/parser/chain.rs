@@ -1,81 +1,86 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::blockchain::parser::blkfile::BlkFile;
-use crate::blockchain::parser::index::ChainIndex;
-use crate::blockchain::parser::types::CoinType;
+use crate::blockchain::parser::index::{get_block_index, BlockIndexRecord};
 use crate::blockchain::proto::block::Block;
-use crate::errors::{OpError, OpErrorKind, OpResult};
+use crate::common::utils;
+use crate::errors::OpResult;
 use crate::ParserOptions;
 
-/// Manages the index and data of longest valid chain
-pub struct ChainStorage {
-    chain_index: ChainIndex,
-    blk_files: HashMap<u64, BlkFile>, // maps blk_index to BlkFile
-    coin: CoinType,
-    verify: bool,
+/// Holds the index of longest valid chain
+pub struct ChainStorage<'a> {
+    blocks: Vec<BlockIndexRecord>,
+    index: usize,
+    blk_files: HashMap<usize, BlkFile>,
+    options: &'a RefCell<ParserOptions>,
 }
 
-impl ChainStorage {
-    pub fn new(options: &ParserOptions) -> OpResult<Self> {
+impl<'a> ChainStorage<'a> {
+    #[inline]
+    pub fn new(options: &'a RefCell<ParserOptions>) -> OpResult<Self> {
+        let blockchain_dir = options.borrow().blockchain_dir.clone();
         Ok(Self {
-            chain_index: ChainIndex::new(options)?,
-            blk_files: BlkFile::from_path(options.blockchain_dir.as_path())?,
-            coin: options.coin.clone(),
-            verify: options.verify,
+            blocks: get_block_index(blockchain_dir.join("index").as_path())?,
+            blk_files: BlkFile::from_path(blockchain_dir.as_path())?,
+            index: options.borrow().range.start,
+            options,
         })
     }
 
-    /// Returns the next block and its height
-    pub fn get_block(&mut self, height: u64) -> Option<Block> {
-        // Read block
-        let block_meta = self.chain_index.get(height)?;
-        let blk_file = self.blk_files.get_mut(&block_meta.blk_index)?;
-        let block = blk_file
-            .read_block(block_meta.data_offset, &self.coin)
+    /// Returns the next hash without removing it
+    pub fn get_next(&mut self) -> Option<Block> {
+        if let Some(end) = self.options.borrow().range.end {
+            if self.index == end {
+                return None;
+            }
+        }
+
+        let meta = self.blocks.get(self.index)?;
+        let block = self
+            .blk_files
+            .get(&meta.n_file)?
+            .read_block(meta.n_data_pos, self.options.borrow().coin_type.version_id)
             .ok()?;
 
-        // Check if blk file can be closed
-        if height == self.chain_index.max_height_by_blk(block_meta.blk_index) {
-            blk_file.close()
+
+        if self.options.borrow().verify {
+            self.verify(&block);
         }
 
-        if self.verify {
-            self.verify(&block, height).unwrap();
-        }
-
+        self.index += 1;
         Some(block)
     }
 
     /// Verifies the given block in a chain.
     /// Panics if not valid
-    fn verify(&self, block: &Block, height: u64) -> OpResult<()> {
-        block.verify_merkle_root()?;
-        if height == 0 {
-            if block.header.hash != self.coin.genesis_hash {
-                let msg = format!(
-                    "Genesis block hash doesn't match!\n  -> expected: {}\n  -> got: {}\n",
-                    &self.coin.genesis_hash, &block.header.hash,
+    fn verify(&self, block: &Block) {
+        block.verify_merkle_root();
+        if self.index == 0 {
+            let genesis_hash = self.options.borrow().coin_type.genesis_hash;
+            if block.header.hash != genesis_hash {
+                panic!(
+                    "Hash of genesis doesn't match!\n  -> expected: {}\n  -> got: {}\n",
+                    utils::arr_to_hex_swapped(&genesis_hash),
+                    utils::arr_to_hex_swapped(&block.header.hash),
                 );
-                return Err(OpError::new(OpErrorKind::ValidationError).join_msg(&msg));
             }
         } else {
-            let prev_hash = self
-                .chain_index
-                .get(height - 1)
-                .expect("unable to fetch prev block in chain index")
-                .block_hash;
+            let prev_hash = self.blocks.get(self.index - 1).unwrap().block_hash;
             if block.header.value.prev_hash != prev_hash {
-                let msg = format!(
+                panic!(
                     "prev_hash for block {} doesn't match!\n  -> expected: {}\n  -> got: {}\n",
-                    &block.header.hash, &block.header.value.prev_hash, &prev_hash
+                    utils::arr_to_hex_swapped(&block.header.hash),
+                    utils::arr_to_hex_swapped(&block.header.value.prev_hash),
+                    utils::arr_to_hex_swapped(&prev_hash)
                 );
-                return Err(OpError::new(OpErrorKind::ValidationError).join_msg(&msg));
             }
         }
-        Ok(())
     }
 
-    pub(crate) fn max_height(&self) -> u64 {
-        self.chain_index.max_height()
+    /// Returns number of remaining blocks
+    #[inline]
+    pub fn remaining(&self) -> usize {
+        self.blocks.len().saturating_sub(self.index)
     }
 }
